@@ -20,12 +20,27 @@ python eval/eval_script.py
 ## 3. 复现说明
 
 为了复现 ≥70% 的胜率：
-1. 完成 `train/` 目录下的训练流程。
-2. 将训练得到的最佳模型（例如 `train/ppo_billiards_final.zip` 或 `train/checkpoints/` 下的中间存档）复制到 `eval/checkpoints/best_model.zip`。
-3. 运行 `eval_script.py`。
 
-NewAgent 采用混合策略：
-- 如果加载了 RL 模型，首先使用 PPO 网络预测一个候选动作。
-- 同时使用几何启发式（Ghost Ball）生成候选动作。
-- 通过 Pooltool 物理引擎模拟这些候选动作（Simulation Verification），选择得分最高的动作执行。
-这种方法结合了 RL 的长期规划能力和物理模拟的精确性。
+1.  **训练模型**：完成 `train/` 目录下的训练流程。
+    *   推荐使用 PPO 算法训练至少 500,000 步。
+    *   确保 `train/logs/training_plots/reward_curve.png` 显示 Reward 呈上升趋势并收敛。
+
+2.  **部署模型**：
+    *   训练结束后，`train/` 目录下会生成 `ppo_billiards_final.zip`。
+    *   将该文件复制到 `eval/checkpoints/` 目录，并重命名为 `best_model.zip`。
+    *   或者，你也可以选择 `train/checkpoints/` 中表现最好的中间存档。
+
+3.  **运行评估**：
+    *   运行 `python eval/eval_script.py`。
+    *   脚本将自动加载 `eval/checkpoints/best_model.zip` 并进行 100 局对战测试。
+
+## 4. 策略说明 (NewAgent)
+
+NewAgent 采用混合策略 (Hybrid Strategy)：
+
+*   **强化学习 (RL)**：加载 PPO 模型，根据当前盘面生成动作建议（主要负责复杂局面的决策）。
+*   **启发式规则 (Heuristic)**：使用几何法（Ghost Ball）生成候选动作（主要负责简单直球的精确打击）。
+*   **模拟验证 (Simulation Verification)**：
+    *   Agent 会在内部使用 Pooltool 物理引擎对 RL 动作和启发式动作进行快速模拟。
+    *   选择预期得分最高（如必定进球）的动作执行。
+    *   这种方法结合了 RL 的长期规划能力和物理模拟的精确性，能显著提高胜率。

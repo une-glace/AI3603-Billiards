@@ -290,7 +290,8 @@ class PoolEnv():
         # 实现击球，通过物理仿真获得击球后的球位置信息
         shot = pt.System(table=self.table, balls=self.balls, cue=self.cue)
         self.cue.set_state(V0=action["V0"], phi=action["phi"], theta=action["theta"], a=action['a'], b=action['b'])
-        pt.simulate(shot, inplace=True)
+        # 添加 max_events 防止物理引擎陷入死循环 (如: 6072 step 卡住的问题)
+        pt.simulate(shot, inplace=True, max_events=1000)
         # 记录所有shot，用于游戏结束后进行render
         self.shot_record.append(copy.deepcopy(shot))
 

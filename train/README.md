@@ -14,19 +14,58 @@ pip install stable-baselines3 shimmy gymnasium
 
 - `pool_gym.py`: 包含 `BilliardsGymEnv` 类，这是一个将 `PoolEnv` 包装为 Gymnasium 兼容环境的 Wrapper。它定义了动作空间（连续控制）和观测空间（球位置 + 目标类型）。
 - `train_ppo.py`: 使用 PPO (Proximal Policy Optimization) 算法进行训练的主脚本。包含模型定义、训练循环和 Checkpoint 保存逻辑。
+- `visualize_callback.py`: 自定义回调函数，用于在训练过程中实时绘制和保存 Reward 曲线。
+- `logs/`: 存放训练日志（Monitor CSV）和 TensorBoard 事件文件。
+- `checkpoints/`: 存放定期保存的模型权重（.zip 文件）。
 
 ## 3. 训练命令 (Training Command)
 
 在项目根目录下运行以下命令启动训练：
 
 ```bash
+# 默认训练 1,000,000 步，每 10,000 步保存一次
 python train/train_ppo.py
+
+# 使用 8 个并行环境加速训练（建议设置为 CPU 核心数）
+python train/train_ppo.py --n_envs 8
+
+# 自定义训练总步数（例如 200,000 步）
+python train/train_ppo.py --total_timesteps 200000
+
+# 自定义模型保存频率（例如每 5000 步保存一次）
+python train/train_ppo.py --save_freq 5000
 ```
 
-训练过程中：
-- TensorBoard 日志将保存在 `train/logs/`
-- 模型 Checkpoint 将保存在 `train/checkpoints/`
-- 最终模型将保存为 `train/ppo_billiards_final.zip`
+### 断点续训与自动保存
+- **中断保护**: 随时可以使用 `Ctrl+C` 中断训练。程序会自动保存当前模型为 `train/ppo_billiards_final.zip`，并尝试绘制最终的训练曲线。
+- **自动续训**: 每次启动时，程序会自动检测 `final.zip` 或 `checkpoints/` 目录下的最新模型，并从上次中断的地方继续训练。
+- **安全备份**: 旧的 `final.zip` 文件会被自动重命名备份（例如 `ppo_billiards_final_backup_1701234567.zip`），确保历史最佳模型不会被意外覆盖。
+
+### 训练日志与输出
+- **日志记录 (Logs)**: 所有的训练日志（Monitor CSV, TensorBoard event files）都保存在 `train/logs/` 目录下。
+- **实时图像 (Plots)**: 
+    - `train/logs/training_plots/reward_curve.png`: 实时更新的 Reward 曲线图。脚本会自动加载历史 Monitor 数据，确保曲线在视觉上是连续的。
+    - `train/logs/training_plots/final_reward_curve.png`: 训练结束（或中断）时生成的完整历史曲线。
+- **模型存档 (Checkpoints)**: 中间模型默认每隔 10000 步保存一次（可通过 `--save_freq` 修改），存放在 `train/checkpoints/`。
+- **最终模型 (Final Model)**: 训练完成后的最终模型将保存为 `train/ppo_billiards_final.zip`。
+
+### 如何查看训练过程 (Monitoring)
+
+**方式一：查看自动生成的图像 (推荐)**
+直接打开 `train/logs/training_plots/reward_curve.png`。
+- 该图片会随着训练进行自动更新（每 10 个 episode 更新一次）。
+- 红色曲线代表滑动平均值，能更清晰地反映趋势。
+
+**方式二：使用 TensorBoard (高级)**
+如果您想查看 Loss 曲线、学习率变化等更详细的指标，可以使用 TensorBoard：
+
+1. 打开终端，进入项目根目录。
+2. 运行命令：
+   ```bash
+   tensorboard --logdir ./train/logs/
+   ```
+3. 在浏览器中访问终端输出的地址（通常是 `http://localhost:6006`）。
+   - **注意**: TensorBoard 可能会显示多个 Run（如 `PPO_run_170...`）。您可以同时勾选多个 Run 来查看连续的训练历史。
 
 ## 4. 超参数设置 (Hyperparameters)
 
@@ -35,6 +74,7 @@ python train/train_ppo.py
 - **Algorithm**: PPO (Proximal Policy Optimization)
 - **Policy**: MlpPolicy (多层感知机)
 - **Learning Rate**: 3e-4
+- **n_envs**: 4 (默认并行环境数，可通过命令行调整)
 - **n_steps**: 2048 (每次更新收集的步数)
 - **batch_size**: 64
 - **n_epochs**: 10
@@ -42,7 +82,6 @@ python train/train_ppo.py
 - **gae_lambda**: 0.95
 - **clip_range**: 0.2
 - **ent_coef**: 0.01 (熵系数，鼓励探索)
-- **Total Timesteps**: 1,000,000 (一百万步)
 
 ## 5. 奖励函数设计 (Reward Function)
 
