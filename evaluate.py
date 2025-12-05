@@ -20,6 +20,10 @@ import copy
 import os
 from datetime import datetime
 import random
+import warnings
+
+# 忽略 pooltool 的数值计算警告
+warnings.filterwarnings("ignore", category=RuntimeWarning, module="pooltool")
 
 from poolenv import PoolEnv
 from agent import Agent, BasicAgent, NewAgent

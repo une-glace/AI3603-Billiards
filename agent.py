@@ -167,8 +167,8 @@ class BasicAgent(Agent):
         }
         
         # 优化参数
-        self.INITIAL_SEARCH = 20
-        self.OPT_SEARCH = 10
+        self.INITIAL_SEARCH = 5
+        self.OPT_SEARCH = 2
         self.ALPHA = 1e-2
         
         # 模拟噪声（可调整以改变训练难度）
@@ -245,7 +245,13 @@ class BasicAgent(Agent):
 
             # 1.动态创建“奖励函数” (Wrapper)
             # 贝叶斯优化器会调用此函数，并传入参数
+            sim_count = 0
             def reward_fn_wrapper(V0, phi, theta, a, b):
+                nonlocal sim_count
+                sim_count += 1
+                if sim_count % 1 == 0:
+                    print(f"  > [BasicAgent] 正在进行第 {sim_count} 次模拟...", end='\r')
+                
                 # 创建一个用于模拟的沙盒系统
                 sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
                 sim_table = copy.deepcopy(table)
@@ -323,18 +329,153 @@ class BasicAgent(Agent):
             return self._random_action()
 
 class NewAgent(Agent):
-    """自定义 Agent 模板（待学生实现）"""
+    """基于几何计算与搜索的改进 Agent"""
     
     def __init__(self):
-        pass
-    
+        super().__init__()
+        self.num_V0_samples = 3  # 速度采样数
+        self.V0_list = [1.5, 3.0, 5.5] # 速度候选项
+        print("NewAgent (Geometric Planning + Simulation Search) 已初始化。")
+        
     def decision(self, balls=None, my_targets=None, table=None):
         """决策方法
         
         参数：
-            observation: (balls, my_targets, table)
+            balls: 球状态字典
+            my_targets: 目标球列表
+            table: 球桌对象
         
         返回：
             dict: {'V0', 'phi', 'theta', 'a', 'b'}
         """
-        return self._random_action()
+        if balls is None or table is None:
+            return self._random_action()
+        
+        # 1. 确定实际目标球
+        # 过滤掉已经进袋的球
+        valid_targets = [bid for bid in my_targets if balls[bid].state.s != 4]
+        
+        # 如果目标球全进了，就打黑8
+        if not valid_targets:
+            valid_targets = ['8']
+            
+        cue_ball = balls['cue']
+        cue_pos = cue_ball.state.rvw[0] # [x, y, z]
+        
+        candidates = [] # 存储候选击球参数 (V0, phi)
+        
+        # 2. 几何分析生成候选动作
+        for target_id in valid_targets:
+            target_ball = balls[target_id]
+            target_pos = target_ball.state.rvw[0]
+            
+            # 遍历所有球袋
+            for pocket_id, pocket in table.pockets.items():
+                pocket_pos = pocket.center
+                
+                # --- 幽灵球计算 ---
+                # 目标球到袋口的向量
+                to_pocket_vec = pocket_pos - target_pos
+                # 忽略Z轴（只看平面）
+                to_pocket_vec[2] = 0
+                dist_to_pocket = np.linalg.norm(to_pocket_vec)
+                
+                if dist_to_pocket < 1e-4:
+                    continue
+                    
+                # 单位方向向量 (目标球 -> 袋口)
+                dir_to_pocket = to_pocket_vec / dist_to_pocket
+                
+                # 幽灵球位置：目标球位置沿反方向延伸 2*半径 (约0.057m)
+                # 假设标准台球半径约 0.0285m (pooltool默认)
+                # 我们可以更精确地获取，但这里用 approximate
+                # 实际上 pooltool 的 ball.R 可以获取半径吗？
+                # 这里假设两球半径相同，GhostPos = TargetPos - Dir * (2R)
+                # 我们可以动态计算两球中心距离：2 * target_ball.params.R (如果存在params)
+                # 但 pooltool 的 ball 对象可能没有 params 属性直接暴露在这里
+                # 通常 pooltool 半径默认是 0.028575
+                BALL_RADIUS = 0.028575
+                ghost_pos = target_pos - dir_to_pocket * (2 * BALL_RADIUS)
+                
+                # --- 计算母球击打角度 ---
+                cue_to_ghost_vec = ghost_pos - cue_pos
+                cue_to_ghost_vec[2] = 0
+                dist_cue_to_ghost = np.linalg.norm(cue_to_ghost_vec)
+                
+                if dist_cue_to_ghost < 1e-4:
+                    continue
+                
+                # 计算切球角度 (Cut Angle)
+                # 幽灵球向量 与 进袋向量 的夹角
+                # 实际上就是 cue_to_ghost_vec 与 to_pocket_vec 的夹角
+                # cos(theta) = (u . v) / (|u| |v|)
+                dot_prod = np.dot(cue_to_ghost_vec, to_pocket_vec)
+                cos_theta = dot_prod / (dist_cue_to_ghost * dist_to_pocket)
+                # 限制范围防止数值误差
+                cos_theta = np.clip(cos_theta, -1.0, 1.0)
+                cut_angle_rad = np.arccos(cos_theta)
+                cut_angle_deg = np.degrees(cut_angle_rad)
+                
+                # 如果切球角度过大 (>80度)，很难打进，跳过
+                if abs(cut_angle_deg) > 80:
+                    continue
+                    
+                # 计算 phi (水平角度)
+                # atan2(y, x) 返回弧度，需转为角度
+                phi_rad = np.arctan2(cue_to_ghost_vec[1], cue_to_ghost_vec[0])
+                phi_deg = np.degrees(phi_rad)
+                # 规范化到 [0, 360)
+                phi_deg = phi_deg % 360
+                
+                # --- 添加候选项 ---
+                # 对每个合理的几何角度，尝试不同的力度
+                for v in self.V0_list:
+                    # 稍微增加一点角度扰动，以应对物理误差
+                    candidates.append({'V0': v, 'phi': phi_deg})
+                    candidates.append({'V0': v, 'phi': (phi_deg + 0.5) % 360})
+                    candidates.append({'V0': v, 'phi': (phi_deg - 0.5) % 360})
+
+        # 如果没有几何候选项（例如被完全遮挡或角度都不对），回退到随机
+        if not candidates:
+            return self._random_action()
+
+        # 3. 模拟并评分
+        best_score = -float('inf')
+        best_action = None
+        
+        # 保存击球前状态快照
+        last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+        
+        for cand in candidates:
+            # 构建模拟环境
+            sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
+            sim_table = copy.deepcopy(table)
+            cue = pt.Cue(cue_ball_id="cue")
+            
+            shot = pt.System(table=sim_table, balls=sim_balls, cue=cue)
+            
+            # 设置击球参数 (theta, a, b 设为默认值)
+            # 可以在后续改进中优化 a,b (加塞)
+            params = {
+                'V0': cand['V0'],
+                'phi': cand['phi'],
+                'theta': 0.0,
+                'a': 0.0,
+                'b': 0.0
+            }
+            shot.cue.set_state(**params)
+            
+            try:
+                pt.simulate(shot, inplace=True)
+                score = analyze_shot_for_reward(shot, last_state_snapshot, my_targets)
+            except:
+                score = -1000
+            
+            if score > best_score:
+                best_score = score
+                best_action = params
+        
+        if best_action is None:
+            return self._random_action()
+            
+        return best_action
