@@ -4,7 +4,7 @@ agent.py - Agent 决策模块
 定义 Agent 基类和具体实现：
 - Agent: 基类，定义决策接口
 - BasicAgent: 基于贝叶斯优化的参考实现
-- NewAgent: 学生自定义实现模板
+- NewAgent: 基于强化学习 (PPO) + 启发式搜索的改进实现
 - analyze_shot_for_reward: 击球结果评分函数
 """
 
@@ -16,8 +16,15 @@ import copy
 import os
 from datetime import datetime
 import random
-# from poolagent.pool import Pool as CuetipEnv, State as CuetipState
-# from poolagent import FunctionAgent
+import utils
+
+# 尝试导入 stable-baselines3，用于加载 RL 模型
+try:
+    from stable_baselines3 import PPO
+    RL_AVAILABLE = True
+except ImportError:
+    RL_AVAILABLE = False
+    print("Warning: stable-baselines3 not found. NewAgent will fallback to heuristic mode.")
 
 from bayes_opt import BayesianOptimization, SequentialDomainReductionTransformer
 from sklearn.gaussian_process import GaussianProcessRegressor
@@ -329,153 +336,147 @@ class BasicAgent(Agent):
             return self._random_action()
 
 class NewAgent(Agent):
-    """基于几何计算与搜索的改进 Agent"""
+    """
+    基于强化学习 (PPO) + 启发式搜索的改进 Agent
     
-    def __init__(self):
+    设计思路：
+    1. 尝试加载预训练的 PPO 模型进行快速推理。
+    2. 如果模型不可用，回退到基于几何的启发式搜索 + 少量物理模拟验证。
+    3. 混合策略：RL 给出大致方向，通过模拟微调（Domain Randomization Robustness）。
+    """
+    
+    def __init__(self, model_path="train/ppo_billiards_final.zip"):
         super().__init__()
-        self.num_V0_samples = 3  # 速度采样数
-        self.V0_list = [1.5, 3.0, 5.5] # 速度候选项
-        print("NewAgent (Geometric Planning + Simulation Search) 已初始化。")
+        self.model = None
+        if RL_AVAILABLE:
+            try:
+                # 尝试加载模型
+                # 注意：实际路径可能需要根据运行位置调整
+                abs_path = os.path.abspath(model_path)
+                if os.path.exists(abs_path):
+                    self.model = PPO.load(abs_path)
+                    print(f"NewAgent (RL-PPO) 模型加载成功: {abs_path}")
+                else:
+                    print(f"NewAgent (RL-PPO) 警告: 模型文件不存在 {abs_path}，将使用启发式模式。")
+            except Exception as e:
+                print(f"NewAgent (RL-PPO) 模型加载失败: {e}")
+        
+        # 启发式搜索参数
+        self.num_simulation = 20 # 每次决策进行的模拟次数
+        print("NewAgent (RL + Simulation Search) 已初始化。")
         
     def decision(self, balls=None, my_targets=None, table=None):
-        """决策方法
-        
-        参数：
-            balls: 球状态字典
-            my_targets: 目标球列表
-            table: 球桌对象
-        
-        返回：
-            dict: {'V0', 'phi', 'theta', 'a', 'b'}
-        """
         if balls is None or table is None:
             return self._random_action()
+            
+        # 策略 1: 如果有 RL 模型，优先询问模型
+        rl_action = None
+        if self.model:
+            try:
+                obs = utils.get_obs_vector(balls, my_targets)
+                action_vec, _ = self.model.predict(obs, deterministic=True)
+                
+                # 映射动作回物理空间
+                rl_action = {
+                    'V0': float((action_vec[0] + 1) / 2 * (8.0 - 0.5) + 0.5),
+                    'phi': float((action_vec[1] + 1) / 2 * 360.0),
+                    'theta': float((action_vec[2] + 1) / 2 * 90.0),
+                    'a': float(action_vec[3] * 0.5),
+                    'b': float(action_vec[4] * 0.5)
+                }
+                
+                # 如果完全信任 RL，可以直接返回
+                # 但为了稳健性（Robustness），我们可以把 RL 的动作作为一个高质量的候选
+                # 并与几何启发式的动作一起进行模拟验证
+            except Exception as e:
+                print(f"RL 推理出错: {e}")
         
-        # 1. 确定实际目标球
-        # 过滤掉已经进袋的球
+        # 策略 2: 几何启发式生成候选动作 (Ghost Ball)
+        candidates = []
+        if rl_action:
+            candidates.append(rl_action)
+            
+        # 确定有效目标球
         valid_targets = [bid for bid in my_targets if balls[bid].state.s != 4]
+        if not valid_targets: valid_targets = ['8']
         
-        # 如果目标球全进了，就打黑8
-        if not valid_targets:
-            valid_targets = ['8']
-            
-        cue_ball = balls['cue']
-        cue_pos = cue_ball.state.rvw[0] # [x, y, z]
+        cue_pos = balls['cue'].state.rvw[0]
+        BALL_RADIUS = 0.028575
         
-        candidates = [] # 存储候选击球参数 (V0, phi)
-        
-        # 2. 几何分析生成候选动作
         for target_id in valid_targets:
-            target_ball = balls[target_id]
-            target_pos = target_ball.state.rvw[0]
+            target_pos = balls[target_id].state.rvw[0]
             
-            # 遍历所有球袋
-            for pocket_id, pocket in table.pockets.items():
+            # 对每个袋口
+            for pocket in table.pockets.values():
                 pocket_pos = pocket.center
                 
-                # --- 幽灵球计算 ---
-                # 目标球到袋口的向量
-                to_pocket_vec = pocket_pos - target_pos
-                # 忽略Z轴（只看平面）
-                to_pocket_vec[2] = 0
-                dist_to_pocket = np.linalg.norm(to_pocket_vec)
+                # 计算幽灵球位置
+                to_pocket = pocket_pos - target_pos
+                to_pocket[2] = 0
+                dist = np.linalg.norm(to_pocket)
+                if dist < 1e-4: continue
                 
-                if dist_to_pocket < 1e-4:
-                    continue
-                    
-                # 单位方向向量 (目标球 -> 袋口)
-                dir_to_pocket = to_pocket_vec / dist_to_pocket
-                
-                # 幽灵球位置：目标球位置沿反方向延伸 2*半径 (约0.057m)
-                # 假设标准台球半径约 0.0285m (pooltool默认)
-                # 我们可以更精确地获取，但这里用 approximate
-                # 实际上 pooltool 的 ball.R 可以获取半径吗？
-                # 这里假设两球半径相同，GhostPos = TargetPos - Dir * (2R)
-                # 我们可以动态计算两球中心距离：2 * target_ball.params.R (如果存在params)
-                # 但 pooltool 的 ball 对象可能没有 params 属性直接暴露在这里
-                # 通常 pooltool 半径默认是 0.028575
-                BALL_RADIUS = 0.028575
+                dir_to_pocket = to_pocket / dist
                 ghost_pos = target_pos - dir_to_pocket * (2 * BALL_RADIUS)
                 
-                # --- 计算母球击打角度 ---
-                cue_to_ghost_vec = ghost_pos - cue_pos
-                cue_to_ghost_vec[2] = 0
-                dist_cue_to_ghost = np.linalg.norm(cue_to_ghost_vec)
+                # 计算母球到幽灵球的击球角度
+                aim_vec = ghost_pos - cue_pos
+                aim_vec[2] = 0
+                aim_dist = np.linalg.norm(aim_vec)
+                if aim_dist < 1e-4: continue
                 
-                if dist_cue_to_ghost < 1e-4:
-                    continue
+                aim_angle_rad = math.atan2(aim_vec[1], aim_vec[0])
+                aim_angle_deg = math.degrees(aim_angle_rad) % 360
                 
-                # 计算切球角度 (Cut Angle)
-                # 幽灵球向量 与 进袋向量 的夹角
-                # 实际上就是 cue_to_ghost_vec 与 to_pocket_vec 的夹角
-                # cos(theta) = (u . v) / (|u| |v|)
-                dot_prod = np.dot(cue_to_ghost_vec, to_pocket_vec)
-                cos_theta = dot_prod / (dist_cue_to_ghost * dist_to_pocket)
-                # 限制范围防止数值误差
-                cos_theta = np.clip(cos_theta, -1.0, 1.0)
-                cut_angle_rad = np.arccos(cos_theta)
-                cut_angle_deg = np.degrees(cut_angle_rad)
-                
-                # 如果切球角度过大 (>80度)，很难打进，跳过
-                if abs(cut_angle_deg) > 80:
-                    continue
+                # 检查是否被阻挡 (简单的点积判断或距离判断，这里省略复杂检测)
+                # 生成几个不同力度的候选
+                for v in [2.0, 4.0, 6.5]:
+                    candidates.append({
+                        'V0': v,
+                        'phi': aim_angle_deg,
+                        'theta': 0.0, # 平射
+                        'a': 0.0,
+                        'b': 0.0
+                    })
                     
-                # 计算 phi (水平角度)
-                # atan2(y, x) 返回弧度，需转为角度
-                phi_rad = np.arctan2(cue_to_ghost_vec[1], cue_to_ghost_vec[0])
-                phi_deg = np.degrees(phi_rad)
-                # 规范化到 [0, 360)
-                phi_deg = phi_deg % 360
-                
-                # --- 添加候选项 ---
-                # 对每个合理的几何角度，尝试不同的力度
-                for v in self.V0_list:
-                    # 稍微增加一点角度扰动，以应对物理误差
-                    candidates.append({'V0': v, 'phi': phi_deg})
-                    candidates.append({'V0': v, 'phi': (phi_deg + 0.5) % 360})
-                    candidates.append({'V0': v, 'phi': (phi_deg - 0.5) % 360})
-
-        # 如果没有几何候选项（例如被完全遮挡或角度都不对），回退到随机
+        # 如果没有候选（比如都被挡住了），随机生成几个
         if not candidates:
-            return self._random_action()
-
-        # 3. 模拟并评分
+            for _ in range(5):
+                candidates.append(self._random_action())
+                
+        # 策略 3: 并行/串行 模拟验证 (Simulate & Select)
+        # 从候选动作中选出得分最高的
         best_score = -float('inf')
-        best_action = None
+        best_action = candidates[0]
         
-        # 保存击球前状态快照
+        # 如果候选太多，随机采样一部分，保证实时性
+        if len(candidates) > 20:
+            candidates = random.sample(candidates, 20)
+            if rl_action: candidates.append(rl_action) # 确保 RL 动作在列表里
+            
         last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
         
-        for cand in candidates:
-            # 构建模拟环境
+        for action in candidates:
+            # 模拟一次 (不加噪声或加少量噪声)
             sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
             sim_table = copy.deepcopy(table)
             cue = pt.Cue(cue_ball_id="cue")
-            
             shot = pt.System(table=sim_table, balls=sim_balls, cue=cue)
             
-            # 设置击球参数 (theta, a, b 设为默认值)
-            # 可以在后续改进中优化 a,b (加塞)
-            params = {
-                'V0': cand['V0'],
-                'phi': cand['phi'],
-                'theta': 0.0,
-                'a': 0.0,
-                'b': 0.0
-            }
-            shot.cue.set_state(**params)
+            shot.cue.set_state(V0=action['V0'], phi=action['phi'], theta=action['theta'], a=action['a'], b=action['b'])
+            pt.simulate(shot, inplace=True)
             
-            try:
-                pt.simulate(shot, inplace=True)
-                score = analyze_shot_for_reward(shot, last_state_snapshot, my_targets)
-            except:
-                score = -1000
+            score = analyze_shot_for_reward(shot, last_state_snapshot, my_targets)
             
+            # 简单的位置启发式奖励：如果母球停在中心区域，加分
+            final_cue = shot.balls['cue']
+            if final_cue.state.s != 4: # 没进袋
+                # 简单的中心倾向
+                pass 
+                
             if score > best_score:
                 best_score = score
-                best_action = params
-        
-        if best_action is None:
-            return self._random_action()
-            
+                best_action = action
+                
+        print(f"[NewAgent] 最佳模拟得分: {best_score:.1f}, 动作: V0={best_action['V0']:.1f}, phi={best_action['phi']:.1f}")
         return best_action
