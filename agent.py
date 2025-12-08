@@ -14,6 +14,8 @@ import numpy as np
 from pooltool.objects import PocketTableSpecs, Table, TableType
 import copy
 import os
+import pickle
+import numpy as np
 from datetime import datetime
 import random
 import utils
@@ -348,6 +350,7 @@ class NewAgent(Agent):
     def __init__(self, model_path="train/ppo_billiards_final.zip"):
         super().__init__()
         self.model = None
+        self._norm = None
         if RL_AVAILABLE:
             try:
                 # 尝试加载模型
@@ -356,6 +359,20 @@ class NewAgent(Agent):
                 if os.path.exists(abs_path):
                     self.model = PPO.load(abs_path)
                     print(f"NewAgent (RL-PPO) 模型加载成功: {abs_path}")
+                    base = abs_path[:-4] if abs_path.endswith('.zip') else abs_path
+                    vec_path = base + "_vecnormalize.pkl"
+                    if os.path.exists(vec_path):
+                        try:
+                            with open(vec_path, 'rb') as f:
+                                data = pickle.load(f)
+                            self._norm = {
+                                'mean': np.array(data['obs_rms']['mean'], dtype=np.float32),
+                                'var': np.array(data['obs_rms']['var'], dtype=np.float32),
+                                'clip': float(data.get('clip_obs', 10.0))
+                            }
+                            print(f"VecNormalize 统计已加载: {vec_path}")
+                        except Exception as e:
+                            print(f"VecNormalize 加载失败: {e}")
                 else:
                     print(f"NewAgent (RL-PPO) 警告: 模型文件不存在 {abs_path}，将使用启发式模式。")
             except Exception as e:
@@ -374,6 +391,10 @@ class NewAgent(Agent):
         if self.model:
             try:
                 obs = utils.get_obs_vector(balls, my_targets)
+                if self._norm is not None:
+                    eps = 1e-8
+                    obs = (obs - self._norm['mean']) / np.sqrt(self._norm['var'] + eps)
+                    obs = np.clip(obs, -self._norm['clip'], self._norm['clip'])
                 action_vec, _ = self.model.predict(obs, deterministic=True)
                 
                 # 映射动作回物理空间

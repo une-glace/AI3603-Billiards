@@ -29,9 +29,9 @@ class TrainingVisualizerCallback(BaseCallback):
             # 如果是第一次训练或没有日志文件，忽略错误
             pass
         
-        # 简单的 buffer 用于记录最近一次 episode 的累积奖励
-        self.current_episode_reward = 0
-        self.current_episode_length = 0
+        # 用于多环境跟踪的 buffers
+        self.current_episode_rewards = None
+        self.current_episode_lengths = None
         
         # 记录 losses (从 logger 中提取)
         self.policy_losses = []
@@ -40,25 +40,30 @@ class TrainingVisualizerCallback(BaseCallback):
 
     def _on_step(self) -> bool:
         # 获取当前 step 的 reward 和 done 信息
-        # infos 是一个列表，包含了每个环境的 info 字典
-        # rewards 是一个数组，包含了每个环境的 reward
         rewards = self.locals["rewards"]
         dones = self.locals["dones"]
+        num_envs = len(rewards)
         
-        # 我们假设是单环境训练
-        self.current_episode_reward += rewards[0]
-        self.current_episode_length += 1
-        
-        if dones[0]:
-            self.episode_rewards.append(self.current_episode_reward)
-            self.episode_lengths.append(self.current_episode_length)
-            self.current_episode_reward = 0
-            self.current_episode_length = 0
+        # 初始化 buffers
+        if self.current_episode_rewards is None:
+            self.current_episode_rewards = np.zeros(num_envs)
+            self.current_episode_lengths = np.zeros(num_envs, dtype=int)
             
-            # 每完成一定数量的 episode 更新一次图像
-            if len(self.episode_rewards) % 10 == 0:
-                self._plot_rewards()
+        # 更新每个环境的状态
+        for i in range(num_envs):
+            self.current_episode_rewards[i] += rewards[i]
+            self.current_episode_lengths[i] += 1
+            
+            if dones[i]:
+                self.episode_rewards.append(self.current_episode_rewards[i])
+                self.episode_lengths.append(self.current_episode_lengths[i])
+                self.current_episode_rewards[i] = 0
+                self.current_episode_lengths[i] = 0
                 
+                # 每完成一定数量的 episode 更新一次图像
+                if len(self.episode_rewards) % 10 == 0:
+                    self._plot_rewards()
+                    
         return True
 
     def _on_rollout_end(self) -> None:

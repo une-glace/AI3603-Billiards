@@ -67,7 +67,38 @@ python train/train_ppo.py --save_freq 5000
 3. 在浏览器中访问终端输出的地址（通常是 `http://localhost:6006`）。
    - **注意**: TensorBoard 可能会显示多个 Run（如 `PPO_run_170...`）。您可以同时勾选多个 Run 来查看连续的训练历史。
 
-## 4. 超参数设置 (Hyperparameters)
+## 4. 图像绘制与数据说明 (Visualization Guide)
+
+### 图片文件的含义
+- **`reward_curve.png` (实时训练曲线)**
+  - **生成时机**: 训练过程中实时生成，每完成 10 个 Episode 更新一次。
+  - **数据来源**: 内存中累积的 Reward 数据 + 启动时加载的历史 Monitor 日志。
+  - **用途**: 用于实时监控训练是否有进展（Reward 是否在上升）。
+  - **注意**: 如果中断后重新开始，脚本会读取之前的日志，接续绘制，保持曲线连续。
+
+- **`final_reward_curve.png` (最终复盘曲线)**
+  - **生成时机**: 训练正常结束或被 `Ctrl+C` 中断时生成。
+  - **数据来源**: 直接读取磁盘上所有的 `*.monitor.csv` 日志文件。
+  - **用途**: 最完整、最准确的历史记录。即使中间内存数据丢失，只要日志文件还在，这张图就是完整的。
+
+### 关键概念解释
+- **Episode (回合)**: 
+  - 指一局完整的台球游戏。
+  - 结束条件: 赢了 (打进黑8)、输了 (母球进袋/打错黑8)、或达到最大步数 (60步)。
+- **Step (步数)**: 
+  - Agent 做出一次击球动作算 1 步。
+  - 一个 Episode 通常包含 10~60 个 Steps。
+- **多核训练 (Multi-Core)**:
+  - 使用 `--n_envs 8` 时，相当于 8 个台球桌同时开打。
+  - **Total Timesteps** 是 8 个核步数的总和。
+  - **Episode 计数** 是所有核完成局数的总和 (任何一个核打完一局，总 Episode 数 +1)。
+
+### TensorBoard 记录机制
+- TensorBoard 并不是每一步都记录。
+- **记录频率**: PPO 算法每收集满 `n_steps` (默认 2048) 个数据，进行一次网络更新，然后记录一次日志。
+- **现象**: 刚开始训练时 (小于 2048 步)，TensorBoard 可能是空的，这是正常现象。
+
+## 5. 超参数设置 (Hyperparameters)
 
 在 `train_ppo.py` 中使用了以下 PPO 默认超参数（可根据需要在代码中调整）：
 
@@ -83,7 +114,7 @@ python train/train_ppo.py --save_freq 5000
 - **clip_range**: 0.2
 - **ent_coef**: 0.01 (熵系数，鼓励探索)
 
-## 5. 奖励函数设计 (Reward Function)
+## 6. 奖励函数设计 (Reward Function)
 
 奖励函数在 `pool_gym.py` 的 `_compute_reward` 方法中定义，主要包含：
 - **进球奖励**: 每打进一个己方目标球 +10
