@@ -335,7 +335,48 @@ class NewAgent(Agent):
         super().__init__()
         self.num_V0_samples = 3  # 速度采样数
         self.V0_list = [1.5, 3.0, 5.5] # 速度候选项
-        print("NewAgent (Geometric Planning + Simulation Search) 已初始化。")
+        self.weights = np.array([0.0, 1.2, 0.8, 0.6, 1.0, -0.1])
+        self.alpha = 0.05
+        self.top_k = 24
+        self.explore_k = 6
+        self.eps = 0.1
+        self.BALL_RADIUS = 0.028575
+        print("NewAgent (Geometric+Search + ContextualBandit) 已初始化。")
+    
+    def _point_to_segment_distance(self, p, a, b):
+        ap = p - a
+        ab = b - a
+        denom = np.dot(ab[:2], ab[:2])
+        if denom <= 1e-9:
+            return np.linalg.norm(ap[:2])
+        t = np.clip(np.dot(ap[:2], ab[:2]) / denom, 0.0, 1.0)
+        closest = a + t * ab
+        return np.linalg.norm((p - closest)[:2])
+    
+    def _extract_features(self, cue_pos, target_pos, pocket_pos, ghost_pos, balls, v0, cut_angle_deg, dist_to_pocket, dist_cue_to_ghost):
+        clear = 1.0
+        for bid, b in balls.items():
+            if bid in ['cue']:
+                continue
+            if np.array_equal(b.state.rvw[0], target_pos):
+                continue
+            p = b.state.rvw[0]
+            d = self._point_to_segment_distance(p, cue_pos, ghost_pos)
+            if d <= self.BALL_RADIUS * 1.25:
+                clear = 0.0
+                break
+        f_cut = 1.0 - (min(abs(cut_angle_deg), 80.0) / 80.0)
+        f_dp = 1.0 / (1.0 + dist_to_pocket)
+        f_cg = 1.0 / (1.0 + dist_cue_to_ghost)
+        f_v = v0 / 8.0
+        return np.array([1.0, f_cut, f_dp, f_cg, clear, f_v])
+    
+    def _predict(self, feats):
+        return float(np.dot(self.weights, feats))
+    
+    def _update(self, feats, reward, pred):
+        r = float(np.clip(reward, -200.0, 200.0))
+        self.weights = self.weights + self.alpha * (r - pred) * feats
         
     def decision(self, balls=None, my_targets=None, table=None):
         """决策方法
@@ -362,7 +403,7 @@ class NewAgent(Agent):
         cue_ball = balls['cue']
         cue_pos = cue_ball.state.rvw[0] # [x, y, z]
         
-        candidates = [] # 存储候选击球参数 (V0, phi)
+        candidates = []
         
         # 2. 几何分析生成候选动作
         for target_id in valid_targets:
@@ -373,29 +414,15 @@ class NewAgent(Agent):
             for pocket_id, pocket in table.pockets.items():
                 pocket_pos = pocket.center
                 
-                # --- 幽灵球计算 ---
-                # 目标球到袋口的向量
                 to_pocket_vec = pocket_pos - target_pos
-                # 忽略Z轴（只看平面）
                 to_pocket_vec[2] = 0
                 dist_to_pocket = np.linalg.norm(to_pocket_vec)
                 
                 if dist_to_pocket < 1e-4:
                     continue
                     
-                # 单位方向向量 (目标球 -> 袋口)
                 dir_to_pocket = to_pocket_vec / dist_to_pocket
-                
-                # 幽灵球位置：目标球位置沿反方向延伸 2*半径 (约0.057m)
-                # 假设标准台球半径约 0.0285m (pooltool默认)
-                # 我们可以更精确地获取，但这里用 approximate
-                # 实际上 pooltool 的 ball.R 可以获取半径吗？
-                # 这里假设两球半径相同，GhostPos = TargetPos - Dir * (2R)
-                # 我们可以动态计算两球中心距离：2 * target_ball.params.R (如果存在params)
-                # 但 pooltool 的 ball 对象可能没有 params 属性直接暴露在这里
-                # 通常 pooltool 半径默认是 0.028575
-                BALL_RADIUS = 0.028575
-                ghost_pos = target_pos - dir_to_pocket * (2 * BALL_RADIUS)
+                ghost_pos = target_pos - dir_to_pocket * (2 * self.BALL_RADIUS)
                 
                 # --- 计算母球击打角度 ---
                 cue_to_ghost_vec = ghost_pos - cue_pos
@@ -405,10 +432,6 @@ class NewAgent(Agent):
                 if dist_cue_to_ghost < 1e-4:
                     continue
                 
-                # 计算切球角度 (Cut Angle)
-                # 幽灵球向量 与 进袋向量 的夹角
-                # 实际上就是 cue_to_ghost_vec 与 to_pocket_vec 的夹角
-                # cos(theta) = (u . v) / (|u| |v|)
                 dot_prod = np.dot(cue_to_ghost_vec, to_pocket_vec)
                 cos_theta = dot_prod / (dist_cue_to_ghost * dist_to_pocket)
                 # 限制范围防止数值误差
@@ -420,25 +443,38 @@ class NewAgent(Agent):
                 if abs(cut_angle_deg) > 80:
                     continue
                     
-                # 计算 phi (水平角度)
-                # atan2(y, x) 返回弧度，需转为角度
                 phi_rad = np.arctan2(cue_to_ghost_vec[1], cue_to_ghost_vec[0])
                 phi_deg = np.degrees(phi_rad)
                 # 规范化到 [0, 360)
                 phi_deg = phi_deg % 360
                 
-                # --- 添加候选项 ---
-                # 对每个合理的几何角度，尝试不同的力度
                 for v in self.V0_list:
-                    # 稍微增加一点角度扰动，以应对物理误差
-                    candidates.append({'V0': v, 'phi': phi_deg})
-                    candidates.append({'V0': v, 'phi': (phi_deg + 0.5) % 360})
-                    candidates.append({'V0': v, 'phi': (phi_deg - 0.5) % 360})
+                    feats = self._extract_features(cue_pos, target_pos, pocket_pos, ghost_pos, balls, v, cut_angle_deg, dist_to_pocket, dist_cue_to_ghost)
+                    pred = self._predict(feats)
+                    candidates.append({'V0': v, 'phi': phi_deg, 'feats': feats, 'pred': pred})
+                    candidates.append({'V0': v, 'phi': (phi_deg + 0.5) % 360, 'feats': feats, 'pred': pred})
+                    candidates.append({'V0': v, 'phi': (phi_deg - 0.5) % 360, 'feats': feats, 'pred': pred})
 
         # 如果没有几何候选项（例如被完全遮挡或角度都不对），回退到随机
         if not candidates:
             return self._random_action()
 
+        candidates.sort(key=lambda c: c.get('pred', 0.0), reverse=True)
+        k = min(len(candidates), self.top_k)
+        selected = candidates[:k]
+        if random.random() < self.eps:
+            extra = min(len(candidates), self.explore_k)
+            selected.extend(random.sample(candidates, extra))
+        used = set()
+        uniq = []
+        for c in selected:
+            key = (round(c['V0'], 3), round(c['phi'], 3))
+            if key in used:
+                continue
+            used.add(key)
+            uniq.append(c)
+        selected = uniq
+        
         # 3. 模拟并评分
         best_score = -float('inf')
         best_action = None
@@ -446,7 +482,7 @@ class NewAgent(Agent):
         # 保存击球前状态快照
         last_state_snapshot = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
         
-        for cand in candidates:
+        for cand in selected:
             # 构建模拟环境
             sim_balls = {bid: copy.deepcopy(ball) for bid, ball in balls.items()}
             sim_table = copy.deepcopy(table)
@@ -468,6 +504,7 @@ class NewAgent(Agent):
             try:
                 pt.simulate(shot, inplace=True)
                 score = analyze_shot_for_reward(shot, last_state_snapshot, my_targets)
+                self._update(cand['feats'], score, cand.get('pred', 0.0))
             except:
                 score = -1000
             
