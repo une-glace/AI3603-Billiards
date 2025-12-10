@@ -23,12 +23,26 @@
 
 报告请使用英文撰写，限制15页以内，陈述清楚即可，不需要在意报告页数。最终根据代码完成度、报告内容、击球效果进行综合评分。
 
+报告模板请参照IEEE会议双栏模板：https://www.overleaf.com/1998687845fyyfzhmpnfkd#b117f2
+此为共享链接，各组同学通过**overleaf**打开后左上角点击**Menu**，选择**Copy project**后在自己的模板上编辑
+
 # 环境配置
-操作系统推荐 Ubuntu 22.04
-Python版本推荐3.10以上
+操作系统推荐 Ubuntu 22.04，Python版本推荐3.13
+
 安装相关依赖：
 ```bash
-pip install -r requirements.txt
+# 创建环境
+conda create -n poolenv python=3.13
+conda activate poolenv
+# clone pooltool
+git clone https://github.com/SJTU-RL2/pooltool.git
+cd pooltool
+# 安装poetry
+pip install "poetry==2.2.1"
+# 基于源代码安装poolenv
+poetry install --with=dev,docs
+# 运行base agent需要安装的库
+pip install bayesian-optimization numpy
 ```
 # 实现思路
 本项目不限制实现思路，可以使用包括但不限于以下思路的实现：

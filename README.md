@@ -11,4 +11,8 @@ AI3603课程台球大作业
 | `PROJECT_GUIDE.md` | 项目详细指南 | 📖 参考文档 |
 | `GAME_RULES.md` | 游戏规则说明 | 📖 参考文档 |
 
+对作业内容的视频说明：
+说明.mp4：https://pan.sjtu.edu.cn/web/share/da9459405eac6252d01c249c3bcb989f
+供大家参考，以文字说明为准。
+
 ---
