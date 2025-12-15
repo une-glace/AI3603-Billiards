@@ -390,8 +390,7 @@ class NewAgent(Agent):
     
     def __init__(self):
         super().__init__()
-        self.num_V0_samples = 3  # 速度采样数
-        self.V0_list = [1.5, 3.0, 5.5] # 速度候选项
+        self.V0_list = [2.0, 4.5] # 减少速度候选项，去掉过小或过大的
         print("NewAgent (Geometric Planning + Simulation Search) 已初始化。")
         
     def decision(self, balls=None, my_targets=None, table=None):
@@ -444,13 +443,6 @@ class NewAgent(Agent):
                 dir_to_pocket = to_pocket_vec / dist_to_pocket
                 
                 # 幽灵球位置：目标球位置沿反方向延伸 2*半径 (约0.057m)
-                # 假设标准台球半径约 0.0285m (pooltool默认)
-                # 我们可以更精确地获取，但这里用 approximate
-                # 实际上 pooltool 的 ball.R 可以获取半径吗？
-                # 这里假设两球半径相同，GhostPos = TargetPos - Dir * (2R)
-                # 我们可以动态计算两球中心距离：2 * target_ball.params.R (如果存在params)
-                # 但 pooltool 的 ball 对象可能没有 params 属性直接暴露在这里
-                # 通常 pooltool 半径默认是 0.028575
                 BALL_RADIUS = 0.028575
                 ghost_pos = target_pos - dir_to_pocket * (2 * BALL_RADIUS)
                 
@@ -465,7 +457,6 @@ class NewAgent(Agent):
                 # 计算切球角度 (Cut Angle)
                 # 幽灵球向量 与 进袋向量 的夹角
                 # 实际上就是 cue_to_ghost_vec 与 to_pocket_vec 的夹角
-                # cos(theta) = (u . v) / (|u| |v|)
                 dot_prod = np.dot(cue_to_ghost_vec, to_pocket_vec)
                 cos_theta = dot_prod / (dist_cue_to_ghost * dist_to_pocket)
                 # 限制范围防止数值误差
@@ -473,24 +464,26 @@ class NewAgent(Agent):
                 cut_angle_rad = np.arccos(cos_theta)
                 cut_angle_deg = np.degrees(cut_angle_rad)
                 
-                # 如果切球角度过大 (>80度)，很难打进，跳过
-                if abs(cut_angle_deg) > 80:
+                # 如果切球角度过大 (>70度)，很难打进且模拟耗时，跳过（收紧阈值）
+                if abs(cut_angle_deg) > 70:
                     continue
                     
                 # 计算 phi (水平角度)
-                # atan2(y, x) 返回弧度，需转为角度
                 phi_rad = np.arctan2(cue_to_ghost_vec[1], cue_to_ghost_vec[0])
                 phi_deg = np.degrees(phi_rad)
                 # 规范化到 [0, 360)
                 phi_deg = phi_deg % 360
                 
                 # --- 添加候选项 ---
-                # 对每个合理的几何角度，尝试不同的力度
+                # 减少每个几何解生成的候选数量
+                # 只有当角度真的很正的时候才多尝试几种力度
                 for v in self.V0_list:
-                    # 稍微增加一点角度扰动，以应对物理误差
                     candidates.append({'V0': v, 'phi': phi_deg})
-                    candidates.append({'V0': v, 'phi': (phi_deg + 0.5) % 360})
-                    candidates.append({'V0': v, 'phi': (phi_deg - 0.5) % 360})
+                    # 只有在大力出奇迹或者角度比较刁钻时才微调角度，这里为了速度，去掉微调
+                    # 或者只保留一个微调方向
+                    # candidates.append({'V0': v, 'phi': (phi_deg + 0.5) % 360}) 
+                    # candidates.append({'V0': v, 'phi': (phi_deg - 0.5) % 360})
+
 
         # 如果没有几何候选项（例如被完全遮挡或角度都不对），回退到随机
         if not candidates:
