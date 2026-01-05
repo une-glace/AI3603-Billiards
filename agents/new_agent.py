@@ -2,7 +2,17 @@ import math
 import pooltool as pt
 import numpy as np
 from pooltool.objects import PocketTableSpecs, Table, TableType
+import copy
+import os
 from datetime import datetime
+import random
+import signal
+# from poolagent.pool import Pool as CuetipEnv, State as CuetipState
+# from poolagent import FunctionAgent
+
+from bayes_opt import BayesianOptimization, SequentialDomainReductionTransformer
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import Matern
 
 from .agent import Agent
 
