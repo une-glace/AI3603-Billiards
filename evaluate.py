@@ -23,7 +23,7 @@ set_random_seed(enable=False, seed=42)
 
 env = PoolEnv()
 results = {'AGENT_A_WIN': 0, 'AGENT_B_WIN': 0, 'SAME': 0}
-n_games = 40  # 对战局数 自己测试时可以修改 扩充为120局为了减少随机带来的扰动
+n_games = 120  # 对战局数 自己测试时可以修改 扩充为120局为了减少随机带来的扰动
 
 ## 选择对打的对手
 # agent_a, agent_b = BasicAgent(), NewAgent() # 与 BasicAgent 对打
